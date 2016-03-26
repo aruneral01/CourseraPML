@@ -1,0 +1,253 @@
+---
+title: Practical Machine Learning Project - Exercise Predictor Report
+author: "Arun Krishnasamy"
+output:
+  html_document:
+    fig_height: 8
+    fig_width: 8
+    theme: cosmo
+    toc: no
+  knitrBootstrap::bootstrap_document:
+    highlight.chooser: yes
+    theme.chooser: yes
+    
+---
+
+## Introduction  
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.  
+
+In this project, we will use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did the exercise.  
+
+## Loading the required packages 
+
+```{r, packages, cache = T}
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(corrplot)
+setInternet2(TRUE)
+library(downloader)
+
+```
+
+### Download the Data
+
+```{r, datadownload, cache = T}
+traindataUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testdataUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+traindataFile <- "./data/pml-training.csv"
+testdataFile  <- "./data/pml-testing.csv"
+
+if (!file.exists("./data")) {
+  dir.create("./data")
+}
+
+if (!file.exists(traindataFile)) {
+  download(traindataUrl, destfile = traindataFile)
+}
+if (!file.exists(testdataFile)) {
+  download(testdataUrl, destfile = testdataFile)
+}
+
+```  
+
+### Read the Downloaded Data
+
+Reading the two csv files into two data frames.  
+
+```{r, Downloaded Data, cache = T}
+# reading the data from CSV files to a vectos
+#
+traindataRaw <- read.csv("./data/pml-training.csv")
+testdataRaw <- read.csv("./data/pml-testing.csv")
+dim(traindataRaw)
+dim(testdataRaw)
+
+```
+
+### Exploratory Data Analysis process
+
+The training data has 19622 observations and 160 variables, while the testing data set contains 20 observations and 160 variables. The "classe" variable in the training set is the outcome to predict. 
+
+
+```{r training, summary}
+## assign the summary table of the training data set to the variable summ
+summ_traindataRaw <- summary(traindataRaw)
+dim(summ_traindataRaw)
+
+```
+
+```{r, trainingsum, cache = T}
+
+sum(complete.cases(traindataRaw))
+
+```
+
+### Data Cleansing process
+
+Data cleansing to eliminate missing values and what i think as useless variables for this exercise
+
+First, we remove columns that contain NA missing values.
+
+```{r, RemovingNAValues, cache = T}
+
+## remove the column with the NA's
+
+traindataRaw <- traindataRaw[, colSums(is.na(traindataRaw)) == 0] 
+testdataRaw <- testdataRaw[, colSums(is.na(testdataRaw)) == 0] 
+
+## remove the column with the row number
+traindataRaw$X <- NULL
+
+```  
+
+
+Next, remove some columns that do not contribute much to the accelerometer measurements.
+
+```{r, RemovingColumns, cache = T}
+## cleaning the training data; removing the unnecessary columns
+
+classe <- traindataRaw$classe
+trainRemove <- grepl("^X|timestamp|window", names(traindataRaw))
+traindataRaw <- traindataRaw[, !trainRemove]
+traindataCleaned <- traindataRaw[, sapply(traindataRaw, is.numeric)]
+traindataCleaned$classe <- classe
+
+## cleaning the test data
+
+testRemove <- grepl("^X|timestamp|window", names(testdataRaw))
+testdataRaw <- testdataRaw[, !testRemove]
+testdataCleaned <- testdataRaw[, sapply(testdataRaw, is.numeric)]
+
+```
+
+
+Now, the cleaned training data set contains 19622 observations and 53 variables, while the testing data set contains 20 observations and 53 variables. The "classe" variable is still in the cleaned training set.
+
+The remaining fifty-eight (53) variables were used as predictors.  A histogram showing the frequency of the values of `classe` was created to see if there is a large skew in the data toward one of the possible ways of
+performing the exercise.  
+
+
+```{r histogram, fig.keep="none"}
+
+## create a variable to represent the x-axis as "classe" is a factor and
+## histograms can only be drawn for numeric data
+traindataCleanedclassnum <- as.numeric(traindataCleaned$classe)
+
+## create the histogram and change its density to percentages
+traindataCleanedhistogram <- hist(traindataCleanedclassnum)
+traindataCleanedhistogram$density <- traindataCleanedhistogram$counts / sum(traindataCleanedhistogram$counts) * 100
+```
+
+```{r histogram2, fig.path="images/"}
+## plot the histogram, leaving the x-axis blank
+plot(traindataCleanedhistogram, freq = F, main = "Histogram of Classe for the Training Set", ylab = 
+         "Percentage", xlab ="Classe", xaxt = "n", col = "black")
+
+## add the axis
+axis(1,at = 1:5,labels = c("A","B","C","D","E"))
+```
+
+Based on the histogram, it does not seem that any of the values is much more likely than any of the others.
+
+
+### Slice the data
+
+Then, we can split the cleaned training set into a pure training data set (60%) and a validation data set (40%). We will use the validation data set to conduct cross validation in future steps.  
+
+```{r, slicingdata, cache = T}
+
+set.seed(50000) # For reproducibile random#
+
+inTrainData <- createDataPartition(traindataCleaned$classe, p = 0.60, list = F)
+trainData <- traindataCleaned[inTrainData, ]
+testData <- traindataCleaned[-inTrainData, ]
+
+```
+
+## Random Forest Data Modeling
+
+
+We will use a predictive model for activity recognition using **Random Forest** algorithm because it automatically selects important variables and is robust to correlated covariates & outliers in general. We will use **10-fold cross validation** when applying the algorithm.  
+
+
+```{r, runningrandomforest, cache = T}
+
+controlfactorRf <- trainControl(method = "cv", 10)
+
+trainmodelRf <- train(classe ~ ., data = trainData, method = "rf", trControl = controlfactorRf, ntree = 250)
+
+trainmodelRf
+
+```
+
+
+Determine the performance of the model on the validation data set.  
+
+```{r, prediction, cache = T}
+
+trainpredictRf <- predict(trainmodelRf, testData)
+confusionMatrix(testData$classe, trainpredictRf)
+
+
+```
+
+
+Looking for the accuracy and sample error metrics
+
+```{r, accuracyestimation, cache = T}
+
+modelaccuracy <- postResample(trainpredictRf, testData$classe)
+modelaccuracy
+
+sampleerror <- 1 - as.numeric(confusionMatrix(testData$classe, trainpredictRf)$overall[1])
+sampleerror
+
+```
+
+
+So, the estimated accuracy of the model is 99.17% and the estimated out-of-sample error is 0.83%.
+
+
+## Predicting for Test Data Set
+
+Applying the model to the original testing data set downloaded from the data source. We may remove the `problem_id` column first.  
+
+```{r, output, cache = T}
+## predict the training set and store the results in a character vector
+output <- predict(trainmodelRf, testdataCleaned[, -length(names(testdataCleaned))])
+
+
+## display the predictions
+output
+
+```  
+
+### Output files
+
+Per the assignment, the prediction algorithm created above is applied to the 
+twenty (20) cases in the testing data set.  For each test case, a text file is 
+created with a single capital letter (A, B, C, D, or E) corresponding to the 
+prediction for the corresponding problem in the test data set. These files were
+then manually submitted to Coursera for grading.
+
+```{r, cache = T }
+## create a directory called "test_output," suppressing warnings if the Directory already exists
+
+dir.create(file.path("project_output"), showWarnings = FALSE)
+
+## create a function to write the files to be submitted
+write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("project_output/problem_id_", i, ".txt")
+        write.table(x[i], file = filename, quote = FALSE, row.names = FALSE, 
+                    col.names = FALSE)
+    }
+}
+
+## then create the files, one for each prediction
+write_files(output)
+
+```
